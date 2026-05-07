@@ -836,6 +836,170 @@ test("runtime schema migrates workspace rows to registry and identity file", () 
   store.close();
 });
 
+test("legacy owner-table migration preserves explicit custom workspace_path", () => {
+  const root = makeTempDir("hb-state-store-");
+  const dbPath = path.join(root, "runtime.db");
+  const workspaceRoot = path.join(root, "workspace");
+  const customRoot = makeTempDir("hb-custom-ws-");
+  const customPath = path.join(customRoot, "workspace-custom");
+  fs.mkdirSync(customPath, { recursive: true });
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+
+  const db = new Database(dbPath);
+  db.exec(`
+    CREATE TABLE workspaces_legacy_with_owner (
+        id TEXT PRIMARY KEY,
+        workspace_path TEXT,
+        holaboss_user_id TEXT,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        harness TEXT,
+        error_message TEXT,
+        onboarding_status TEXT NOT NULL,
+        onboarding_session_id TEXT,
+        onboarding_completed_at TEXT,
+        onboarding_completion_summary TEXT,
+        onboarding_requested_at TEXT,
+        onboarding_requested_by TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        deleted_at_utc TEXT
+    );
+
+    CREATE INDEX idx_workspaces_user_updated
+      ON workspaces_legacy_with_owner (holaboss_user_id, updated_at DESC);
+  `);
+  db.prepare(`
+    INSERT INTO workspaces_legacy_with_owner (
+        id, workspace_path, holaboss_user_id, name, status, harness, error_message,
+        onboarding_status, onboarding_session_id, onboarding_completed_at,
+        onboarding_completion_summary, onboarding_requested_at, onboarding_requested_by,
+        created_at, updated_at, deleted_at_utc
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "workspace-custom",
+    customPath,
+    "user-1",
+    "Custom",
+    "active",
+    "pi",
+    null,
+    "not_required",
+    null,
+    null,
+    null,
+    null,
+    null,
+    "2026-01-01T00:00:00+00:00",
+    "2026-01-02T00:00:00+00:00",
+    null
+  );
+  db.close();
+
+  const store = new RuntimeStateStore({ dbPath, workspaceRoot });
+
+  assert.equal(path.resolve(store.workspaceDir("workspace-custom")), path.resolve(customPath));
+  const identityPath = path.join(customPath, ".holaboss", "state", "workspace_id");
+  assert.equal(fs.readFileSync(identityPath, "utf-8").trim(), "workspace-custom");
+
+  const dbAfter = new Database(dbPath, { readonly: true });
+  const tables = new Set<string>(
+    (dbAfter.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+      (row) => row.name
+    )
+  );
+  const row = dbAfter
+    .prepare<[string], { workspace_path: string }>("SELECT workspace_path FROM workspaces WHERE id = ?")
+    .get("workspace-custom");
+  dbAfter.close();
+
+  assert.ok(row);
+  assert.equal(tables.has("workspaces_legacy_with_owner"), false);
+  assert.equal(path.resolve(row.workspace_path), path.resolve(customPath));
+  store.close();
+});
+
+test("legacy owner-table migration falls back when workspace_path points at a stale managed folder", () => {
+  const root = makeTempDir("hb-state-store-");
+  const dbPath = path.join(root, "runtime.db");
+  const workspaceRoot = path.join(root, "workspace");
+  const originalPath = path.join(workspaceRoot, "workspace-stale");
+  const renamedPath = path.join(workspaceRoot, "workspace-renamed");
+  fs.mkdirSync(path.join(renamedPath, ".holaboss", "state"), { recursive: true });
+  fs.writeFileSync(
+    path.join(renamedPath, ".holaboss", "state", "workspace_id"),
+    "workspace-stale\n",
+    "utf-8",
+  );
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+
+  const db = new Database(dbPath);
+  db.exec(`
+    CREATE TABLE workspaces_legacy_with_owner (
+        id TEXT PRIMARY KEY,
+        workspace_path TEXT,
+        holaboss_user_id TEXT,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        harness TEXT,
+        error_message TEXT,
+        onboarding_status TEXT NOT NULL,
+        onboarding_session_id TEXT,
+        onboarding_completed_at TEXT,
+        onboarding_completion_summary TEXT,
+        onboarding_requested_at TEXT,
+        onboarding_requested_by TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        deleted_at_utc TEXT
+    );
+
+    CREATE INDEX idx_workspaces_user_updated
+      ON workspaces_legacy_with_owner (holaboss_user_id, updated_at DESC);
+  `);
+  db.prepare(`
+    INSERT INTO workspaces_legacy_with_owner (
+        id, workspace_path, holaboss_user_id, name, status, harness, error_message,
+        onboarding_status, onboarding_session_id, onboarding_completed_at,
+        onboarding_completion_summary, onboarding_requested_at, onboarding_requested_by,
+        created_at, updated_at, deleted_at_utc
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "workspace-stale",
+    originalPath,
+    "user-1",
+    "Stale",
+    "active",
+    "pi",
+    null,
+    "not_required",
+    null,
+    null,
+    null,
+    null,
+    null,
+    "2026-01-01T00:00:00+00:00",
+    "2026-01-02T00:00:00+00:00",
+    null
+  );
+  db.close();
+
+  const store = new RuntimeStateStore({ dbPath, workspaceRoot });
+
+  assert.equal(path.resolve(store.workspaceDir("workspace-stale")), path.resolve(renamedPath));
+  assert.equal(fs.existsSync(originalPath), false);
+
+  const dbAfter = new Database(dbPath, { readonly: true });
+  const row = dbAfter
+    .prepare<[string], { workspace_path: string }>("SELECT workspace_path FROM workspaces WHERE id = ?")
+    .get("workspace-stale");
+  dbAfter.close();
+
+  assert.ok(row);
+  assert.equal(path.resolve(row.workspace_path), path.resolve(renamedPath));
+  store.close();
+});
+
 test("workspaceDir recovers when folder is renamed", () => {
   const root = makeTempDir("hb-state-store-");
   const dbPath = path.join(root, "runtime.db");

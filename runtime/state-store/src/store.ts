@@ -9213,10 +9213,59 @@ export class RuntimeStateStore {
     }
 
     if (tableNames.has("workspaces_legacy_with_owner")) {
-      const rows = db.prepare<[], Omit<WorkspaceRow, "workspace_path">>("SELECT * FROM workspaces_legacy_with_owner").all();
+      const legacyColumns = new Set<string>(
+        (
+          db.prepare("PRAGMA table_info(workspaces_legacy_with_owner)").all() as Array<{
+            name: string;
+          }>
+        ).map((row) => row.name)
+      );
+      const rows = db.prepare<[], Record<string, unknown>>("SELECT * FROM workspaces_legacy_with_owner").all();
       for (const row of rows) {
         const record = this.workspaceRecordFromRowLike(row);
-        this.upsertWorkspaceRowInDb(record, this.discoverWorkspacePath(record.id) ?? this.defaultWorkspaceDir(record.id), db);
+        const legacyWorkspacePath =
+          legacyColumns.has("workspace_path") &&
+          typeof row.workspace_path === "string" &&
+          row.workspace_path.trim()
+            ? row.workspace_path.trim()
+            : null;
+        let existingLegacyWorkspaceDir: string | null = null;
+        if (legacyWorkspacePath && !record.deletedAtUtc) {
+          try {
+            const resolvedLegacyPath = path.resolve(legacyWorkspacePath);
+            if (fs.existsSync(resolvedLegacyPath) && fs.statSync(resolvedLegacyPath).isDirectory()) {
+              existingLegacyWorkspaceDir = resolvedLegacyPath;
+            }
+          } catch {
+            existingLegacyWorkspaceDir = null;
+          }
+        }
+        const workspacePath = record.deletedAtUtc
+          ? (
+              (() => {
+                const preservedPath = this.workspacePathMatchesIdentity(
+                  this.discoverWorkspacePath(record.id),
+                  record.id,
+                ) ?? this.workspacePathMatchesIdentity(
+                  legacyWorkspacePath?.startsWith(`${DELETED_WORKSPACE_PATH_TOMBSTONE_PREFIX}/`)
+                    ? decodeDeletedWorkspacePathTombstone(legacyWorkspacePath, record.id)
+                    : legacyWorkspacePath,
+                  record.id,
+                );
+                return preservedPath
+                  ? deletedWorkspacePathTombstone(record.id, preservedPath)
+                  : legacyWorkspacePath ?? this.defaultWorkspaceDir(record.id);
+              })()
+            )
+          : (
+              existingLegacyWorkspaceDir ??
+              this.discoverWorkspacePath(record.id) ??
+              this.defaultWorkspaceDir(record.id)
+            );
+        this.upsertWorkspaceRowInDb(record, workspacePath, db);
+        if (!record.deletedAtUtc) {
+          this.writeWorkspaceIdentityFile(workspacePath, record.id);
+        }
       }
       db.exec("DROP TABLE workspaces_legacy_with_owner; DROP INDEX IF EXISTS idx_workspaces_user_updated;");
     }

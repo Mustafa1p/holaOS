@@ -4704,6 +4704,7 @@ function migrateLocalWorkspacesTable(database: Database.Database) {
 
     CREATE TABLE workspaces (
       id TEXT PRIMARY KEY,
+      workspace_path TEXT NOT NULL UNIQUE,
       name TEXT NOT NULL,
       status TEXT NOT NULL,
       harness TEXT,
@@ -4718,9 +4719,33 @@ function migrateLocalWorkspacesTable(database: Database.Database) {
       updated_at TEXT,
       deleted_at_utc TEXT
     );
+  `);
 
+  const legacyRows = database
+    .prepare(`
+      SELECT
+        id,
+        ${columns.has("workspace_path") ? "workspace_path," : ""}
+        name,
+        status,
+        harness,
+        error_message,
+        onboarding_status,
+        onboarding_session_id,
+        onboarding_completed_at,
+        onboarding_completion_summary,
+        onboarding_requested_at,
+        onboarding_requested_by,
+        created_at,
+        updated_at,
+        deleted_at_utc
+      FROM workspaces_legacy_with_owner
+    `)
+    .all() as Array<Record<string, unknown>>;
+  const insert = database.prepare(`
     INSERT INTO workspaces (
       id,
+      workspace_path,
       name,
       status,
       harness,
@@ -4734,26 +4759,36 @@ function migrateLocalWorkspacesTable(database: Database.Database) {
       created_at,
       updated_at,
       deleted_at_utc
-    )
-    SELECT
-      id,
-      name,
-      status,
-      harness,
-      error_message,
-      onboarding_status,
-      onboarding_session_id,
-      onboarding_completed_at,
-      onboarding_completion_summary,
-      onboarding_requested_at,
-      onboarding_requested_by,
-      created_at,
-      updated_at,
-      deleted_at_utc
-    FROM workspaces_legacy_with_owner;
-
-    DROP TABLE workspaces_legacy_with_owner;
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  for (const row of legacyRows) {
+    const rawWorkspacePath =
+      typeof row.workspace_path === "string" ? row.workspace_path.trim() : "";
+    const workspacePath = rawWorkspacePath
+      ? rawWorkspacePath.startsWith("__deleted__/")
+        ? rawWorkspacePath
+        : path.resolve(rawWorkspacePath)
+      : workspaceDirectoryPath(String(row.id ?? ""));
+    insert.run(
+      row.id,
+      workspacePath,
+      row.name,
+      row.status,
+      row.harness ?? null,
+      row.error_message ?? null,
+      row.onboarding_status ?? "not_required",
+      row.onboarding_session_id ?? null,
+      row.onboarding_completed_at ?? null,
+      row.onboarding_completion_summary ?? null,
+      row.onboarding_requested_at ?? null,
+      row.onboarding_requested_by ?? null,
+      row.created_at ?? null,
+      row.updated_at ?? null,
+      row.deleted_at_utc ?? null,
+    );
+  }
+
+  database.exec("DROP TABLE workspaces_legacy_with_owner;");
 }
 
 function migrateRuntimeInstallationStateTable(database: Database.Database) {
@@ -4857,6 +4892,7 @@ async function bootstrapRuntimeDatabase() {
 
       CREATE TABLE IF NOT EXISTS workspaces (
         id TEXT PRIMARY KEY,
+        workspace_path TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         status TEXT NOT NULL,
         harness TEXT,
