@@ -887,6 +887,7 @@ interface RuntimeConfigUpdatePayload {
   modelProxyBaseUrl?: string | null;
   defaultModel?: string | null;
   subagentModel?: string | null;
+  defaultProvider?: string | null;
   defaultBackgroundModel?: string | null;
   defaultEmbeddingModel?: string | null;
   defaultImageModel?: string | null;
@@ -6153,6 +6154,7 @@ async function writeRuntimeConfigFile(update: RuntimeConfigUpdatePayload) {
       ["modelProxyBaseUrl", "model_proxy_base_url"],
       ["defaultModel", "default_model"],
       ["subagentModel", "subagent_model"],
+      ["defaultProvider", "default_provider"],
       ["controlPlaneBaseUrl", "control_plane_base_url"],
     ];
 
@@ -6207,6 +6209,7 @@ async function writeRuntimeConfigFile(update: RuntimeConfigUpdatePayload) {
     assignOrDelete(holabossProvider, "base_url", next.model_proxy_base_url);
     assignOrDelete(runtimePayload, "sandbox_id", next.sandbox_id);
     assignOrDelete(runtimePayload, "default_model", next.default_model);
+    assignOrDelete(runtimePayload, "default_provider", next.default_provider);
     const currentSubagents = runtimeConfigObject(
       runtimePayload.subagents ?? runtimePayload.subAgents,
     );
@@ -8644,6 +8647,60 @@ async function clearRuntimeBindingSecrets(reason: string): Promise<void> {
   });
 }
 
+async function clearManagedHolabossDefaultSelection(
+  reason: string,
+): Promise<void> {
+  const currentConfig = await readRuntimeConfigFile();
+  const currentDocument = await readRuntimeConfigDocument();
+  const defaultProviderId = runtimeConfigField(currentConfig.default_provider);
+  const defaultModelToken = normalizeLegacyRuntimeModelToken(
+    runtimeConfigField(currentConfig.default_model),
+  );
+  const subagentModelToken = normalizeLegacyRuntimeModelToken(
+    runtimeConfigField(currentConfig.subagent_model),
+  );
+  const providerGroups = runtimeProviderModelGroups(
+    currentDocument,
+    currentConfig,
+    runtimeModelCatalogState.providerModelGroups,
+  );
+  const holabossGroupHasModelToken = (token: string): boolean =>
+    Boolean(token) &&
+    providerGroups.some(
+      (group) =>
+        isHolabossProviderAlias(group.providerId) &&
+        group.models.some((model) => model.token.trim() === token),
+    );
+  const clearDefaultProvider = isHolabossProviderAlias(defaultProviderId);
+  const clearDefaultModel =
+    clearDefaultProvider ||
+    isHolabossProviderAlias(
+      configuredProviderIdForRuntimeModelToken(defaultModelToken),
+    ) ||
+    holabossGroupHasModelToken(defaultModelToken);
+  const clearSubagentModel =
+    clearDefaultProvider ||
+    isHolabossProviderAlias(
+      configuredProviderIdForRuntimeModelToken(subagentModelToken),
+    ) ||
+    holabossGroupHasModelToken(subagentModelToken);
+  if (!clearDefaultProvider && !clearDefaultModel && !clearSubagentModel) {
+    return;
+  }
+  await writeRuntimeConfigFile({
+    ...(clearDefaultProvider ? { defaultProvider: null } : {}),
+    ...(clearDefaultModel ? { defaultModel: null } : {}),
+    ...(clearSubagentModel ? { subagentModel: null } : {}),
+  });
+  await emitRuntimeConfig();
+  appendRuntimeEventLog({
+    category: "auth",
+    event: "runtime_binding.invalidate_defaults",
+    outcome: "success",
+    detail: reason,
+  });
+}
+
 async function provisionRuntimeBindingForAuthenticatedUser(
   user: AuthUserPayload,
   options?: {
@@ -8801,6 +8858,9 @@ async function ensureRuntimeBindingReadyForWorkspaceFlow(
     if (canUsePersistedRuntimeBindingWithoutAuth(currentConfig)) {
       return;
     }
+    await clearManagedHolabossDefaultSelection(
+      `${reason}:missing_auth_session`,
+    );
     if (runtimeModelProxyApiKeyFromConfig(currentConfig)) {
       await clearRuntimeBindingSecrets(`${reason}:missing_auth_session`);
     }
@@ -9052,6 +9112,9 @@ async function syncPersistedAuthSessionOnStartup(): Promise<void> {
     emitAuthUserUpdated(user);
     if (!user) {
       const currentConfig = await readRuntimeConfigFile();
+      await clearManagedHolabossDefaultSelection(
+        "startup_missing_auth_session",
+      );
       if (runtimeModelProxyApiKeyFromConfig(currentConfig)) {
         await clearRuntimeBindingSecrets("startup_missing_auth_session");
       }
@@ -21689,6 +21752,7 @@ app.whenReady().then(async () => {
       clearPersistedAuthCookie();
     }
     const runtimeConfig = await readRuntimeConfigFile();
+    await clearManagedHolabossDefaultSelection("auth_sign_out");
     if (
       runtimeConfigIsControlPlaneManaged(runtimeConfig) &&
       runtimeModelProxyApiKeyFromConfig(runtimeConfig)
