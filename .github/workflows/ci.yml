@@ -252,7 +252,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.HOLABOSS_RELEASES_REPO_TOKEN }}
           RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
-          RELEASE_GH_REPO: ${{ env.HOLABOSS_RELEASES_REPO }}
+          RELEASE_GH_REPO: holaboss-ai/holaOS-releases
         run: |
           if [ -z "${GH_TOKEN}" ]; then
             echo "manual release publishing to ${RELEASE_GH_REPO} requires HOLABOSS_RELEASES_REPO_TOKEN" >&2
@@ -728,7 +728,7 @@ jobs:
       HOLABOSS_RELEASE_CHANNEL: ${{ needs.ensure-release.outputs.release_channel }}
       PRERELEASE: ${{ inputs.prerelease }}
       SOURCE_GH_REPO: ${{ github.repository }}
-      RELEASE_GH_REPO: ${{ env.HOLABOSS_RELEASES_REPO }}
+      RELEASE_GH_REPO: holaboss-ai/holaOS-releases
     steps:
       - name: Download macOS desktop release artifacts
         uses: actions/download-artifact@v8
